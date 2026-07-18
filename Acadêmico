@@ -1,0 +1,7 @@
+cd "/home/eldersferro/Documentos/Pós Graduação/Unifametro/Engenharia de Dados"
+git init
+git add
+git commit -m "feat: implementacao de ETL streaming com Spark, Kafka e Dashboard Grafico"
+git branch -M main
+git remote add origin https://github.com/SEU_USUARIO_GITHUB/NOME_DO_REPOSITORIO.git
+git push -u origin main
