@@ -1,0 +1,33 @@
+# Binários e Arquivos do Apache Kafka
+kafka_2.12-*/
+*.tgz
+*.tar.gz
+
+# Logs de Execução e Daemons
+*.log
+nohup.out
+
+# Bancos de dados temporários e Metastore do Spark
+metastore_db/
+derby.log
+.spark-staging/
+checkpoint/
+checkpoint_dir/
+
+# Checkpoints do Jupyter Notebook
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# Python (Cache e Ambientes Virtuais)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.env
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db

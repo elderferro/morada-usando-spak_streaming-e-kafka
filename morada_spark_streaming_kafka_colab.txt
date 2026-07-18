@@ -1,0 +1,208 @@
+# -*- coding: utf-8 -*-
+"""Morada Spark Structured Streaming & Kafka Pipeline - Colab Template
+
+Este script define as células para rodar uma simulação completa de processamento
+em tempo real (Stream Processing) no Google Colab. Ele faz o download e configura 
+o Apache Kafka local, inicia o broker, roda um produtor de reservas fictícias 
+em background e realiza a ingestão e transformação usando PySpark Structured Streaming.
+"""
+
+# ==============================================================================
+# CÉLULA 1: INSTALAÇÃO DO JAVA, SPARK, KAFKA E DEPENDÊNCIAS
+# ==============================================================================
+# Executar este bloco no Colab para instalar a infraestrutura
+"""
+# 1. Instalar Java (Requisito para Kafka e Spark)
+!apt-get install openjdk-8-jdk-headless -qq > /dev/null
+
+# 2. Baixar e extrair o Apache Kafka
+!wget -q https://archive.apache.org/dist/kafka/3.5.1/kafka_2.12-3.5.1.tgz
+!tar -xzf kafka_2.12-3.5.1.tgz
+
+# 3. Instalar PySpark e a biblioteca do Kafka no Python
+!pip install -q pyspark==3.5.0 kafka-python-ng
+"""
+
+import os
+# Definir variáveis de ambiente para o Java
+os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-8-openjdk-amd64"
+
+print("Infraestrutura baixada e variáveis de ambiente configuradas!")
+
+
+# ==============================================================================
+# CÉLULA 2: INICIALIZAÇÃO DO KAFKA E ZOOKEEPER (EM BACKGROUND)
+# ==============================================================================
+# Executar este comando para iniciar os daemons do Kafka no Colab
+"""
+# Iniciar o Zookeeper em segundo plano
+!nohup ./kafka_2.12-3.5.1/bin/zookeeper-server-start.sh ./kafka_2.12-3.5.1/config/zookeeper.properties > zookeeper.log 2>&1 &
+
+# Iniciar o Broker Kafka em segundo plano
+!nohup ./kafka_2.12-3.5.1/bin/kafka-server-start.sh ./kafka_2.12-3.5.1/config/server.properties > kafka.log 2>&1 &
+
+# Aguardar 10 segundos para inicialização dos serviços
+!sleep 10
+
+# Criar o tópico morada-bookings
+!./kafka_2.12-3.5.1/bin/kafka-topics.sh --create --bootstrap-server localhost:9092 --replication-factor 1 --partitions 1 --topic morada-bookings
+"""
+
+print("Serviços Zookeeper & Kafka inicializados em segundo plano!")
+print("Tópico 'morada-bookings' criado com sucesso.")
+
+
+# ==============================================================================
+# CÉLULA 3: SIMULADOR DE STREAMING - PRODUTOR KAFKA EM PYTHON
+# ==============================================================================
+import json
+import time
+import random
+import threading
+from kafka import KafkaProducer
+
+def start_mock_producer():
+    """
+    Função rodando em thread de background que simula a criação de reservas em
+    tempo real pela aplicação móvel/web da Morada e publica no Kafka.
+    """
+    producer = KafkaProducer(
+        bootstrap_servers=['localhost:9092'],
+        value_serializer=lambda v: json.dumps(v).encode('utf-8')
+    )
+    
+    nomes_br = ["Aline Silva", "Bruno Souza", "Carlos Ferreira", "Diana Mendes", "Everton Santos", "Gisele Costa"]
+    estados_br = ["SP", "RJ", "MG", "BA", "SC"]
+    pagamentos = ["pix", "credit_card", "split_bill"]
+    
+    print("Iniciando envio de mensagens para o Kafka...")
+    
+    while True:
+        # Gera dados de reserva sintéticos
+        nome = random.choice(nomes_br)
+        cpf = f"{random.randint(100,999)}.{random.randint(100,999)}.{random.randint(100,999)}-{random.randint(10,99)}"
+        phone = f"+55 ({random.randint(11,21)}) 9{random.randint(8000,9999)}-{random.randint(1000,9999)}"
+        
+        booking_event = {
+            "id": str(random.randint(100000, 999999)),
+            "listing_id": str(random.randint(1, 100)),
+            "primary_guest_name": nome,
+            "primary_guest_cpf": cpf,
+            "primary_guest_phone": phone,
+            "check_in": (time.time() + 86400 * random.randint(1, 30)),
+            "check_out": (time.time() + 86400 * random.randint(31, 35)),
+            "number_of_guests": random.randint(1, 6),
+            "number_of_visitors_day_use": random.randint(0, 3),
+            "nights_total_price": float(round(random.uniform(200.0, 1500.0), 2)),
+            "day_use_total_price": float(round(random.uniform(0.0, 150.0), 2)),
+            "cleaning_fee": 80.0,
+            "platform_fee": 30.0,
+            "discount_amount": 0.0,
+            "total_price": float(round(random.uniform(300.0, 1800.0), 2)),
+            "status": "confirmed",
+            "payment_type": random.choice(pagamentos),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # Publica no tópico do Kafka
+        producer.send('morada-bookings', booking_event)
+        
+        # Envia evento a cada 2 a 5 segundos
+        time.sleep(random.uniform(2.0, 5.0))
+
+# Dispara o produtor em uma Thread secundária para não travar o notebook
+producer_thread = threading.Thread(target=start_mock_producer, daemon=True)
+producer_thread.start()
+
+
+# ==============================================================================
+# CÉLULA 4: INGESTÃO E TRANSFORMAÇÃO COM PYSPARK STREAMING
+# ==============================================================================
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, from_json, regexp_replace, when, expr
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
+
+# 1. Criação do SparkSession incluindo o pacote de integração com o Kafka
+# O pacote org.apache.spark:spark-sql-kafka é essencial para permitir o streaming do Kafka.
+spark = SparkSession.builder \
+    .appName("MoradaRealTimeETL") \
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
+    .config("spark.sql.shuffle.partitions", "2") \
+    .getOrCreate()
+
+# 2. Definição do schema JSON da reserva (Contract alignment)
+booking_schema = StructType([
+    StructField("id", StringType(), True),
+    StructField("listing_id", StringType(), True),
+    StructField("primary_guest_name", StringType(), True),
+    StructField("primary_guest_cpf", StringType(), True),
+    StructField("primary_guest_phone", StringType(), True),
+    StructField("number_of_guests", IntegerType(), True),
+    StructField("number_of_visitors_day_use", IntegerType(), True),
+    StructField("nights_total_price", DoubleType(), True),
+    StructField("day_use_total_price", DoubleType(), True),
+    StructField("cleaning_fee", DoubleType(), True),
+    StructField("platform_fee", DoubleType(), True),
+    StructField("discount_amount", DoubleType(), True),
+    StructField("total_price", DoubleType(), True),
+    StructField("status", StringType(), True),
+    StructField("payment_type", StringType(), True),
+    StructField("timestamp", StringType(), True)
+])
+
+# 3. Leitura do fluxo contínuo do Kafka
+kafka_stream_df = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "localhost:9092") \
+    .option("subscribe", "morada-bookings") \
+    .option("startingOffsets", "latest") \
+    .load()
+
+# 4. Deserialização do valor binário do Kafka em colunas tipadas
+bookings_parsed_df = kafka_stream_df \
+    .selectExpr("CAST(value AS STRING) as json_payload") \
+    .select(from_json(col("json_payload"), booking_schema).alias("data")) \
+    .select("data.*")
+
+# 5. Transformações e Lógica de Negócio em Tempo Real
+# A: LGPD - Mascarar o CPF (ex: 123.456.789-01 -> ***.456.789-**)
+df_clean_cpf = bookings_parsed_df.withColumn("cpf_raw", regexp_replace(col("primary_guest_cpf"), r"[.-]", ""))
+df_masked = df_clean_cpf.withColumn(
+    "masked_cpf",
+    expr("concat('***.', substring(cpf_raw, 4, 3), '.', substring(cpf_raw, 7, 3), '-**')")
+).drop("primary_guest_cpf", "cpf_raw")
+
+# B: Padronização - Limpeza de telefone
+df_phone_clean = df_masked.withColumn(
+    "phone_clean",
+    regexp_replace(col("primary_guest_phone"), r"[^\d+]", "")
+).drop("primary_guest_phone")
+
+# C: Regra de Cashback BR - 2% para Pix, 1% para outros
+df_transformed_final = df_phone_clean.withColumn(
+    "earned_cashback",
+    when(col("payment_type") == "pix", col("total_price") * 0.02)
+    .otherwise(col("total_price") * 0.01)
+)
+
+# 6. Gravar o Stream em uma tabela temporária em memória para consultas ad-hoc no Colab
+query = df_transformed_final.writeStream \
+    .format("memory") \
+    .queryName("morada_bookings_stream") \
+    .outputMode("append") \
+    .start()
+
+print("Streaming iniciado! Gravando em tempo real na tabela em memória 'morada_bookings_stream'.")
+
+
+# ==============================================================================
+# CÉLULA 5: MONITORAMENTO E CONSULTA DOS DADOS PROCESSADOS (VISUALIZAÇÃO)
+# ==============================================================================
+# Execute esta célula repetidamente no Colab para ver os novos eventos processados!
+"""
+# Consulta os últimos eventos transformados
+spark.sql("SELECT timestamp, id, primary_guest_name, masked_cpf, phone_clean, payment_type, total_price, earned_cashback FROM morada_bookings_stream ORDER BY timestamp DESC LIMIT 10").show()
+
+# Agrega faturamento por tipo de pagamento em tempo real
+spark.sql("SELECT payment_type, count(1) as total_reservas, sum(total_price) as faturamento_total, sum(earned_cashback) as cashback_acumulado FROM morada_bookings_stream GROUP BY payment_type").show()
+"""

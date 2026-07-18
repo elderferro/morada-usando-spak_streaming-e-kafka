@@ -1,0 +1,595 @@
+# Morada: Especificação Técnica e Contratos de Integração
+
+Este documento define a especificação arquitetural, os modelos de dados e os contratos de API para a plataforma **Morada**, um serviço de hospedagem alternativa desenhado especificamente para o mercado brasileiro, posicionando-se como um concorrente forte e culturalmente alinhado em relação ao Airbnb.
+
+---
+
+## 1. Visão Geral e Estratégia de Negócio (Diferenciais Competitivos)
+
+Para competir e atrair usuários do Airbnb no Brasil, a **Morada** baseia-se em quatro pilares fundamentais adaptados à realidade nacional:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                                   MORADA                                       │
+├───────────────────┬───────────────────┬───────────────────┬─────────────────────┤
+│  1. PAGAMENTOS    │  2. SEGURANÇA     │ 3. FIT CULTURAL   │ 4. PROGRAMA DE      │
+│     FLEXÍVEIS     │    E CONFIANÇA    │   (BRASILIDADES)  │    FIDELIDADE       │
+├───────────────────┼───────────────────┼───────────────────┼─────────────────────┤
+│ • Pix parcelado   │ • Validação CPF   │ • Política de     │ • Cashback direto   │
+│ • Split de conta  │   (Receita Fed.)  │   Day-Use/Visitas │   via Pix           │
+│   (Grupo/Galera)  │ • Integração      │ • Filtros locais  │ • Parcerias com     │
+│ • Parcelamento no │   WhatsApp        │   (Rede, Filtro   │   programas de      │
+│   Cartão (12x)    │   nativo (SAC/zap)│   de barro, etc)  │   milhas locais     │
+└───────────────────┴───────────────────┴───────────────────┴─────────────────────┘
+```
+
+### Detalhamento dos Diferenciais
+1. **Pagamento Facilitado & Coletivo (Split de Contas)**:
+   - **Split Bill ("Viagem de Galera")**: Permite que o valor total de uma reserva seja dividido entre vários hóspedes. O criador da reserva insere os e-mails/telefones dos pagadores, e cada um recebe um link/PIX para pagar sua quota em até 24h.
+   - **Parcelamento Nativo**: Opção de parcelar em até 12x no cartão de crédito, com simulação transparente de juros (prática cultural consolidada no turismo brasileiro).
+   - **Pix Instantâneo**: Desconto para pagamento à vista por Pix, com reembolso automatizado em caso de cancelamento elegível.
+
+2. **Segurança e Verificação Local**:
+   - **Validação Cadastral Obrigatória**: Integração com APIs governamentais para validação de CPF/CNPJ no cadastro de hóspedes e anfitriões para evitar contas fakes e golpes de aluguel de temporada.
+   - **Filtro de Reputação Serasa**: Para aluguéis de médio/longo prazo (mais de 30 dias), integração opcional de análise de score de crédito.
+
+3. **Adequação Cultural e Lazer (Day-Use & Visitas)**:
+   - **Taxa de Churrasco & Day-Use**: Diferente do Airbnb que proíbe rigidamente visitantes, a Morada permite que o anfitrião configure regras para convidados de dia (Day-Use) com tarifas claras por pessoa para uso de piscina/churrasqueira, regularizando uma prática comum no Brasil.
+   - **Filtros Regionais**: Filtros de busca específicos do cotidiano brasileiro: *Rede de descanso, Filtro de barro, Garagem fechada/portão eletrônico, Tela mosquiteira, Ar-condicionado split potente, Pet-friendly com tela de proteção*.
+
+4. **Retenção e Fidelidade**:
+   - **Cashback Morada**: Parte do valor da reserva retorna como saldo na carteira digital do usuário, que pode ser transferido via Pix ou usado na próxima hospedagem.
+
+---
+
+## 2. Arquitetura de Referência do Sistema
+
+A Morada é desenhada em microserviços para suportar a alta concorrência de pagamentos e consultas de disponibilidade (especialmente em feriados como Carnaval e Ano Novo).
+
+```mermaid
+graph TD
+    %% Clientes
+    App[Morada App Mobile / Web] --> Gateway[API Gateway - Kong/Ocelot]
+
+    %% Gateway para Serviços
+    Gateway --> AuthSvc[Serviço de Autenticação & KYC]
+    Gateway --> ListingSvc[Serviço de Anúncios & Busca]
+    Gateway --> BookingSvc[Serviço de Reservas & Disponibilidade]
+    Gateway --> PaymentSvc[Serviço de Pagamentos & Split]
+    Gateway --> LoyaltySvc[Serviço de Fidelidade & Cashback]
+
+    %% Banco de Dados e Serviços Externos
+    AuthSvc --> DB_Auth[(PostgreSQL - Users)]
+    AuthSvc --> ReceitaAPI[API Receita Federal - Validação CPF]
+    
+    ListingSvc --> DB_Listings[(MongoDB / ElasticSearch)]
+    
+    BookingSvc --> DB_Bookings[(PostgreSQL - Bookings)]
+    BookingSvc --> Redis[(Redis Cache - Lock de Datas)]
+    
+    PaymentSvc --> GatewayPgto[Adquirente - PagSeguro / Mercado Pago / Efí]
+    PaymentSvc --> DB_Payments[(PostgreSQL - Transactions)]
+    
+    LoyaltySvc --> DB_Loyalty[(PostgreSQL - Cashback)]
+
+    classDef service fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef database fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+    classDef external fill:#efebe9,stroke:#4e342e,stroke-width:2px;
+    
+    class AuthSvc,ListingSvc,BookingSvc,PaymentSvc,LoyaltySvc service;
+    class DB_Auth,DB_Listings,DB_Bookings,DB_Payments,DB_Loyalty,Redis database;
+    class ReceitaAPI,GatewayPgto external;
+```
+
+---
+
+## 3. Contratos de Banco de Dados (PostgreSQL Schemas)
+
+Seguem as estruturas de tabelas fundamentais focadas nas funcionalidades customizadas para o mercado brasileiro.
+
+```sql
+-- Habilita extensão para UUID
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 3.1. Tabela de Usuários (Hóspedes e Anfitriões)
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    full_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    phone VARCHAR(20) UNIQUE NOT NULL, -- Formato +55 (DD) 9XXXX-XXXX
+    cpf_cnpj VARCHAR(14) UNIQUE NOT NULL, -- Validação de CPF ou CNPJ
+    birth_date DATE NOT NULL,
+    is_verified_kyc BOOLEAN DEFAULT FALSE,
+    verification_date TIMESTAMP,
+    role VARCHAR(50) DEFAULT 'guest', -- 'guest', 'host', 'admin'
+    pix_key VARCHAR(255), -- Chave Pix padrão para receber reembolsos ou repasses
+    pix_key_type VARCHAR(50), -- 'CPF', 'EMAIL', 'PHONE', 'RANDOM'
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3.2. Anúncios (Listings) com Foco em Filtros e Regras Locais
+CREATE TABLE listings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    host_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(150) NOT NULL,
+    description TEXT NOT NULL,
+    property_type VARCHAR(50) NOT NULL, -- 'casa', 'apartamento', 'chácara', 'quarto'
+    
+    -- Endereço Completo (Brasil)
+    cep VARCHAR(8) NOT NULL,
+    street VARCHAR(255) NOT NULL,
+    number VARCHAR(20) NOT NULL,
+    complement VARCHAR(100),
+    neighborhood VARCHAR(150) NOT NULL,
+    city VARCHAR(150) NOT NULL,
+    state CHAR(2) NOT NULL,
+    
+    -- Capacidades
+    max_guests INTEGER NOT NULL,
+    bathrooms INTEGER NOT NULL,
+    bedrooms INTEGER NOT NULL,
+    beds INTEGER NOT NULL,
+    
+    -- Tarifas Base
+    price_per_night DECIMAL(10, 2) NOT NULL,
+    cleaning_fee DECIMAL(10, 2) DEFAULT 0.00,
+    
+    -- Regras Culturais (Diferenciais)
+    allows_day_use BOOLEAN DEFAULT FALSE,
+    day_use_fee_per_person DECIMAL(10, 2) DEFAULT 0.00,
+    max_day_use_visitors INTEGER DEFAULT 0,
+    allows_parties BOOLEAN DEFAULT FALSE,
+    quiet_hours_start TIME DEFAULT '22:00:00',
+    quiet_hours_end TIME DEFAULT '08:00:00',
+    
+    -- Amenidades Específicas do Brasil (Booleanas para busca rápida)
+    has_churrasqueira BOOLEAN DEFAULT FALSE,
+    has_rede BOOLEAN DEFAULT FALSE,
+    has_filtro_barro BOOLEAN DEFAULT FALSE,
+    has_ar_condicionado BOOLEAN DEFAULT FALSE,
+    has_garagem_coberta BOOLEAN DEFAULT FALSE,
+    has_tela_protecao BOOLEAN DEFAULT FALSE, -- Muito comum para famílias com crianças/pets em aptos
+    has_piscina BOOLEAN DEFAULT FALSE,
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3.3. Reservas (Bookings) com Suporte a Split
+CREATE TABLE bookings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    listing_id UUID REFERENCES listings(id),
+    primary_guest_id UUID REFERENCES users(id),
+    check_in TIMESTAMP NOT NULL,
+    check_out TIMESTAMP NOT NULL,
+    number_of_guests INTEGER NOT NULL,
+    number_of_visitors_day_use INTEGER DEFAULT 0, -- Visitantes adicionais
+    
+    -- Valores
+    nights_total_price DECIMAL(10, 2) NOT NULL,
+    day_use_total_price DECIMAL(10, 2) DEFAULT 0.00,
+    cleaning_fee DECIMAL(10, 2) NOT NULL,
+    platform_fee DECIMAL(10, 2) NOT NULL,
+    discount_amount DECIMAL(10, 2) DEFAULT 0.00,
+    total_price DECIMAL(10, 2) NOT NULL,
+    
+    -- Status da Reserva
+    status VARCHAR(50) DEFAULT 'pending_payment', -- 'pending_payment', 'confirmed', 'cancelled', 'completed'
+    payment_type VARCHAR(50), -- 'pix', 'credit_card', 'split_bill'
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3.4. Controle de Pagamento Coletivo (Split Bill / Viagem de Galera)
+CREATE TABLE split_payments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    booking_id UUID REFERENCES bookings(id) ON DELETE CASCADE,
+    payer_name VARCHAR(100) NOT NULL,
+    payer_email VARCHAR(255) NOT NULL,
+    share_percentage DECIMAL(5, 2) NOT NULL,
+    amount DECIMAL(10, 2) NOT NULL,
+    pix_qr_code TEXT, -- Copia e Cola do Pix gerado para este participante
+    pix_txid VARCHAR(100) UNIQUE,
+    status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'paid', 'expired'
+    paid_at TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL
+);
+
+-- 3.5. Carteira de Cashback (Fidelidade)
+CREATE TABLE loyalty_wallets (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    balance DECIMAL(10, 2) DEFAULT 0.00,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE loyalty_transactions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    wallet_id UUID REFERENCES loyalty_wallets(id) ON DELETE CASCADE,
+    booking_id UUID REFERENCES bookings(id),
+    transaction_type VARCHAR(20) NOT NULL, -- 'earn' (acumulado), 'burn' (usado), 'pix_withdrawal'
+    amount DECIMAL(10, 2) NOT NULL,
+    description VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+## 4. Contrato de API REST (OpenAPI 3.0 / Swagger JSON)
+
+Especificação das rotas cruciais para o funcionamento do fluxo de pagamento compartilhado, reserva com day-use e validação de CPF.
+
+```json
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Morada Core API - Contratos Brasil",
+    "description": "APIs customizadas para o fluxo de reservas, pagamentos com PIX/Split e validação KYC no Brasil.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/auth/register": {
+      "post": {
+        "summary": "Registrar novo usuário com validação de CPF/CNPJ",
+        "description": "Registra o usuário e dispara a verificação em segundo plano na Receita Federal.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserRegistrationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Usuário criado com sucesso e KYC iniciado.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "CPF inválido ou já cadastrado."
+          }
+        }
+      }
+    },
+    "/api/v1/bookings": {
+      "post": {
+        "summary": "Criar uma nova reserva com suporte a Day-Use e Split Bill",
+        "description": "Inicializa o fluxo de checkout. Se o tipo de pagamento for 'split_bill', retorna as instruções para distribuição dos links de pagamento.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBookingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Reserva criada.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookingCreatedResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/split/{bookingId}/status": {
+      "get": {
+        "summary": "Obter o status do pagamento coletivo",
+        "description": "Permite monitorar em tempo real quem da galera já pagou a sua quota do Pix/Cartão.",
+        "parameters": [
+          {
+            "name": "bookingId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SplitStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "UserRegistrationRequest": {
+        "type": "object",
+        "required": ["fullName", "email", "phone", "cpfCnpj", "birthDate"],
+        "properties": {
+          "fullName": { "type": "string", "example": "João da Silva" },
+          "email": { "type": "string", "format": "email", "example": "joao.silva@email.com.br" },
+          "phone": { "type": "string", "example": "+5511999998888" },
+          "cpfCnpj": { "type": "string", "example": "12345678909" },
+          "birthDate": { "type": "string", "format": "date", "example": "1990-05-15" }
+        }
+      },
+      "UserResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "fullName": { "type": "string" },
+          "email": { "type": "string" },
+          "isVerifiedKyc": { "type": "boolean" },
+          "role": { "type": "string" }
+        }
+      },
+      "CreateBookingRequest": {
+        "type": "object",
+        "required": ["listingId", "checkIn", "checkOut", "numberOfGuests", "paymentMethod"],
+        "properties": {
+          "listingId": { "type": "string", "format": "uuid" },
+          "checkIn": { "type": "string", "format": "date-time" },
+          "checkOut": { "type": "string", "format": "date-time" },
+          "numberOfGuests": { "type": "integer", "minimum": 1 },
+          "numberOfVisitorsDayUse": { "type": "integer", "default": 0 },
+          "paymentMethod": { "type": "string", "enum": ["pix", "credit_card", "split_bill"] },
+          "installments": { "type": "integer", "default": 1, "description": "Quantidade de parcelas no cartão de crédito" },
+          "splitPayees": {
+            "type": "array",
+            "description": "Lista de pagadores caso paymentMethod seja split_bill",
+            "items": {
+              "type": "object",
+              "required": ["name", "email", "sharePercentage"],
+              "properties": {
+                "name": { "type": "string" },
+                "email": { "type": "string" },
+                "sharePercentage": { "type": "number", "minimum": 1, "maximum": 100 }
+              }
+            }
+          },
+          "useCashbackAmount": { "type": "number", "default": 0.00 }
+        }
+      },
+      "BookingCreatedResponse": {
+        "type": "object",
+        "properties": {
+          "bookingId": { "type": "string", "format": "uuid" },
+          "status": { "type": "string" },
+          "totalPrice": { "type": "number" },
+          "pixCopieCola": { "type": "string", "description": "Caso pago à vista no PIX ou principal pagador do split" },
+          "splitShareDetails": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "payerEmail": { "type": "string" },
+                "amount": { "type": "number" },
+                "paymentLink": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "SplitStatusResponse": {
+        "type": "object",
+        "properties": {
+          "bookingId": { "type": "string", "format": "uuid" },
+          "totalAmount": { "type": "number" },
+          "amountPaid": { "type": "number" },
+          "isFullyPaid": { "type": "boolean" },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "shares": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "email": { "type": "string" },
+                "amount": { "type": "number" },
+                "status": { "type": "string", "enum": ["pending", "paid", "expired"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## 5. Contratos de Comunicação Interna (gRPC / Protocol Buffers)
+
+Para comunicação veloz e segura entre microserviços, como o serviço de Reservas consultando o serviço de Validação Cadastral/KYC ou processando Cashback.
+
+```protobuf
+syntax = "proto3";
+
+package morada.v1;
+
+option go_package = "github.com/morada/api/v1;moradav1";
+option csharp_namespace = "Morada.Grpc.V1";
+
+// 5.1. Serviço de Validação cadastral (KYC)
+service VerificationService {
+  rpc VerifyCPF (VerifyCPFRequest) returns (VerifyCPFResponse);
+  rpc CheckUserBlacklist (BlacklistRequest) returns (BlacklistResponse);
+}
+
+message VerifyCPFRequest {
+  string cpf = 1;
+  string full_name = 2;
+  string birth_date = 3; // Formato YYYY-MM-DD
+}
+
+message VerifyCPFResponse {
+  bool is_valid = 1;
+  bool matches_receita_federal = 2;
+  string error_message = 3;
+}
+
+message BlacklistRequest {
+  string user_id = 1;
+  string cpf = 2;
+}
+
+message BlacklistResponse {
+  bool is_blocked = 1;
+  string reason = 2;
+}
+
+// 5.2. Serviço de Cashback & Milhas
+service LoyaltyService {
+  rpc CalculateCashback (CalculateCashbackRequest) returns (CalculateCashbackResponse);
+  rpc CreditCashback (CreditCashbackRequest) returns (CreditCashbackResponse);
+}
+
+message CalculateCashbackRequest {
+  string user_id = 1;
+  double booking_value = 2;
+}
+
+message CalculateCashbackResponse {
+  double earned_cashback = 1;
+  double loyalty_points = 2;
+}
+
+message CreditCashbackRequest {
+  string user_id = 1;
+  string booking_id = 2;
+  double amount = 3;
+}
+
+message CreditCashbackResponse {
+  bool success = 1;
+  double new_balance = 2;
+}
+```
+
+---
+
+## 6. Modelos de Interface do Frontend (TypeScript Contracts)
+
+Definição de tipos que sustentam a aplicação mobile (React Native / Flutter) ou Web (Next.js), garantindo a tipagem dos filtros culturais e pagamentos nacionais.
+
+```typescript
+// 6.1. Tipos de Usuário
+export interface User {
+  id: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  cpfCnpj: string;
+  isVerifiedKyc: boolean;
+  role: 'guest' | 'host' | 'admin';
+  pixKey?: string;
+  pixKeyType?: 'CPF' | 'EMAIL' | 'PHONE' | 'RANDOM';
+}
+
+// 6.2. Filtros Específicos Brasileiros e Regras Locais
+export interface CulturalAmenities {
+  hasChurrasqueira: boolean;
+  hasRede: boolean;
+  hasFiltroBarro: boolean;
+  hasArCondicionado: boolean;
+  hasGaragemCoberta: boolean;
+  hasTelaProtecao: boolean; // Tela contra insetos ou de proteção infantil/animal em varandas
+  hasPiscina: boolean;
+}
+
+export interface ListingCulturalRules {
+  allowsDayUse: boolean;
+  dayUseFeePerPerson: number;
+  maxDayUseVisitors: number;
+  allowsParties: boolean;
+  quietHoursStart: string; // Formato HH:MM
+  quietHoursEnd: string;
+}
+
+export interface Listing {
+  id: string;
+  hostId: string;
+  title: string;
+  description: string;
+  propertyType: 'casa' | 'apartamento' | 'chácara' | 'quarto';
+  cep: string;
+  street: string;
+  number: string;
+  complement?: string;
+  neighborhood: string;
+  city: string;
+  state: string;
+  maxGuests: number;
+  pricePerNight: number;
+  cleaningFee: number;
+  amenities: CulturalAmenities;
+  rules: ListingCulturalRules;
+}
+
+// 6.3. Contratos de Pagamento Coletivo e Parcelamento
+export interface SplitPayee {
+  name: string;
+  email: string;
+  sharePercentage: number;
+  amount: number;
+  status: 'pending' | 'paid' | 'expired';
+  pixQrCode?: string;
+  paymentLink?: string;
+}
+
+export interface Booking {
+  id: string;
+  listingId: string;
+  primaryGuestId: string;
+  checkIn: string; // ISO DateTime
+  checkOut: string; // ISO DateTime
+  numberOfGuests: number;
+  numberOfVisitorsDayUse: number;
+  nightsTotalPrice: number;
+  dayUseTotalPrice: number;
+  cleaningFee: number;
+  platformFee: number;
+  discountAmount: number;
+  totalPrice: number;
+  status: 'pending_payment' | 'confirmed' | 'cancelled' | 'completed';
+  paymentType: 'pix' | 'credit_card' | 'split_bill';
+  installments?: number;
+  splitDetails?: SplitPayee[];
+  createdAt: string;
+}
+```
+
+---
+
+## 7. Estratégias de Lançamento e Migração de Usuários (Growth Hacking)
+
+Como converter usuários fidelizados do Airbnb para a Morada:
+
+1. **"Importe sua Reputação"**:
+   - Uma ferramenta Web/Chrome Extension onde anfitriões do Airbnb fazem login, importam suas avaliações de superhost e ganham automaticamente o badge "Anfitrião de Confiança" na Morada com destaque nas buscas por 3 meses.
+2. **"PIX Garantido em Cancelamentos"**:
+   - Reembolso de PIX em até 5 minutos no caso de cancelamentos flexíveis (no Airbnb, reembolsos de cartão demoram até duas faturas).
+3. **Taxa Zero no Primeiro Semestre**:
+   - Anfitriões pagam 0% de comissão de serviço nos primeiros 6 meses ao trazer anúncios ativos e exclusivos no Airbnb para a Morada.
+4. **Reserva Coletiva Facilitada**:
+   - Foco de marketing em viagens de formatura, Réveillon de galera e Carnaval, mostrando a facilidade de organizar a vaquinha do aluguel diretamente pela Morada, poupando o "organizador" de cobrar os amigos individualmente.
