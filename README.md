@@ -1,9 +1,9 @@
-# HospedeBR / Morada: Engenharia de Dados em Tempo Real (Spark & Kafka)
+# Morada: Engenharia de Dados em Tempo Real (Spark & Kafka)
 Elder / Iandra / Assis / Adrinaldo
 
 Este repositório contém a especificação de contratos de dados e a implementação de um pipeline de ETL em tempo real utilizando **Apache Kafka** e **PySpark Structured Streaming**, desenvolvido como projeto prático para a pós-graduação em **Engenharia de Dados (Unifametro)**.
 
-O objetivo do projeto é demonstrar a ingestão, higienização, conformidade regulatória (LGPD) e exibição analítica de eventos de reservas de hospedagem para a plataforma **HospedeBR (Morada)**, um concorrente estratégico focado nas particularidades do mercado brasileiro (como Pix, parcelamento, divisão de contas e taxas de day-use).
+O objetivo do projeto é demonstrar a ingestão, higienização, conformidade regulatória (LGPD) e exibição analítica de eventos de reservas de hospedagem para a plataforma **Morada**, um concorrente estratégico focado nas particularidades do mercado brasileiro (como Pix, parcelamento, divisão de contas e taxas de day-use).
 
 ---
 
